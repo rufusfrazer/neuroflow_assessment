@@ -1,0 +1,247 @@
+---
+title: "frazer_gad_assessment"
+author: "Rufus Frazer"
+date: "November 19, 2020"
+output: ioslides_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+#load libraries needed
+library(readr) #readtable
+library(dplyr) #data aggregation etc
+library(tidyr) #spread
+library(data.table) #aggregate
+library(ggplot2) #visuals
+
+```
+
+
+## Request
+
+For each line, the first column represents the time the measurement was made, the second
+column represents the id of the patient submitting the assessment, the third column is the type
+of assessment submitted, the fourth column is the date that the patient was created, and the
+fifth column represents the final score of the assessment.
+
+Given the information you have and any light research you'd like to do on the topic, what
+insights can you draw? What assumptions have you made about the data? What are 2-3
+additional pieces of information that would be important to collect? We are not looking for
+production-ready code, but we will assess both your approach to visualization and your
+technical abilities.
+
+
+## Contents
+
+- Summary Descriptive Information
+- Sample Visual
+
+start: 11/19: 9:42AM
+finish code part: 11/19: 11:28AM
+sql effort: 25 min
+
+
+
+```{r load_data, message=FALSE, warning=FALSE, include=FALSE}
+#read in data
+phq <- read_csv("C:/Users/Rufus/Downloads/phq_all_final.csv")
+
+```
+
+```{r cleanup_data, message=FALSE, warning=FALSE, include=FALSE}
+#clenup and quick data understanding-- assume that data is relatively clean
+# table(phq$type) #gad7 only #repeated for similar
+# nlevels(as.factor(phq$patient_id)) #15502
+#abandon the time stamp for date, for simplicity, assuming no issues w this in data
+phq$date<-as.Date(phq$date)
+phq$patient_date_created<-as.Date(phq$patient_date_created)
+
+# table(phq$first_form) #find out how many tests are first tests
+#how many tests were taken by the same patient on the same day
+test_cts<-as.data.table(phq)[,.(ct = .N), by = c("patient_id","date")]
+table(test_cts$ct) #tests taken by single patients on the same date - shows multipel onthe same day
+
+phq<-phq %>% 
+        group_by(patient_id,date,patient_date_created) %>%  #don't need tyupe, all gad
+        summarize(score = mean(score)) %>% #average by date, given that some may take multiple tests on the same day
+      ungroup()
+```
+
+```{r add_fields, message=FALSE, warning=FALSE, include=FALSE}
+#add some summary columns
+
+#set a column for patient test number
+phq<-phq %>%
+      group_by(patient_id) %>% 
+      arrange(date) %>%
+      mutate(test_num = rank(date)) %>% #add a test number
+      ungroup()
+
+#set a column for level of gad, based on instructions description:
+# 0-5 low 
+# 6-10 mild
+# 11-15 moderate
+# 16 + severe
+phq$severity_level_bin<-0 #init-- should be nonne remaining-- catch data issues
+phq$severity_level_bin[phq$score<= 5]<-'low' #1 #
+phq$severity_level_bin[phq$score > 5 & phq$score<= 10]<- 'mild'#2 #
+phq$severity_level_bin[phq$score > 10 & phq$score<= 155]<- 'moderate'#3 # 
+phq$severity_level_bin[phq$score > 15]<-'severe' #4 #
+table(phq$severity_level_bin)
+phq$possible_disorder_bin<-ifelse(phq$score >= 10,"disorder","no disorder") #(1,0)
+
+#create a table w whether or not the data has a patients first form
+phq$first_form<-ifelse(phq$date==phq$patient_date_created, 1,0) #see if test was done on same day as create day
+first_form<-phq %>% group_by(patient_id) %>% summarize(first_form = max(first_form))
+
+```
+
+
+```{r patient_summary, message=FALSE, warning=FALSE, include=FALSE}
+#some quick insights
+
+#count of patients w first visits in dataset
+first_vis<-table(first_form$first_form)
+#count of patients with potential gad-- patient level
+potential_gad<-table(phq$possible_disorder_bin)
+
+#set a value of relevant change-- where it counts as "improving"
+chg <-3
+
+#count of patients by worst scenario-- patient level
+potential_gad_cts<-phq %>% 
+               group_by(patient_id) %>% 
+               summarize(max_severity_level = max(severity_level_bin),
+                         max_possible_disorder = max(possible_disorder_bin)) %>%
+                ungroup() 
+patients_by_severity<-table(potential_gad_cts$max_severity_level) #count of patients by worst reported severity
+patients_by_gad<-table(potential_gad_cts$max_possible_disorder) #count of patients by worst reported severity
+
+#count of patients by overall improvement-- earliest available visit better/worse than last available visit
+improving_patients<-phq %>% 
+               group_by(patient_id) %>% 
+               filter(test_num == max(test_num) | test_num == 1.0)  %>% #first or last visit
+               ungroup() %>%
+                mutate(visit_rank = ifelse(test_num == 1.0,'first','last')) %>% #set whether its a first or last visit
+               select(patient_id,score,visit_rank) %>% #choose columns
+              spread(key = visit_rank, value = score) %>%
+              filter(!is.na(last)) %>% #skip those who have only had one test
+              mutate(improving_patient = ifelse(first > last + chg,'improving', #improving
+                                                ifelse(first < last - chg,"declining", #declining
+                                                       "no change"))) #same
+improving_patients<-merge(improving_patients,first_form, by = "patient_id")
+#et summary on patient progress
+#imprpoving by wehther data has first form in it
+table(improving_patients$improving_patient,improving_patients$first_form)
+#improving by starting severity level
+patient_severity_start<-phq %>% filter(test_num == 1.0) %>% 
+  mutate(severity_level_start = severity_level_bin) %>%
+  select(patient_id,severity_level_start)
+improving_patients<-merge(improving_patients,patient_severity_start, by = "patient_id")
+
+table(improving_patients$improving_patient,improving_patients$severity_level_start)
+
+
+
+```
+
+## Answering questions
+
+
+Q:Given the information you have and any light research you'd like to do on the topic, what insights can you draw? 
+
+Likely can make the argument that this group has improved over time
+
+Q:What assumptions have you made about the data?
+Lots: that it's clean-- no obvious errors of user input or data quality; that it's complete-- that patients have all tests included for a given time period andd that time period is a relevan timme period. I might also guess that some treatment has happened, but it would be good to know if this is a control or treatment sample- have these patients had any intervention?
+
+
+Q:What are 2-3additional pieces of information that would be important to collect? 
+Baseline expectations (both about the survey audience-- is this a population sample-- and treatment if any) and typical outcomes could help set up the evaluation of these data. Where does this data come from? Is the patient group homogenous? 
+
+
+
+
+```{r patient_visuals, message=FALSE, warning=FALSE, include=FALSE}
+#visuals
+
+#do some basic visuals on the above items
+hl<-as.data.table(improving_patients)[,.(ct = uniqueN(patient_id)), by = c("improving_patient","severity_level_start")]
+hl<-hl %>% group_by(severity_level_start) %>% mutate(pct = ct/sum(ct)) %>% ungroup()
+hl$pct<-round(hl$pct,3)
+
+
+```
+
+
+## Patient outcomes are positive for severe cases
+```{r display_visuals, echo=FALSE}
+health_improvement<- ggplot(data = hl, aes(x = severity_level_start, y = pct, fill = improving_patient)) +     geom_bar(stat = "identity",color = "black", position = position_dodge()) + 
+   scale_y_continuous(labels=scales::percent) +
+  theme_minimal() +
+# theme(text = element_text(size=12)) +
+        labs(title = 
+              "Improvement Rates in Patients "
+                  ,
+         subtitle =   "by Starting Several Level"
+          ,
+         caption = "Improvement or Decline based on a change of 3 or more points on the GAD7 test"
+         ,
+         y = "Patients", x = "Starting Severity")
+
+health_improvement
+
+```
+
+
+## SQL answers
+
+Note; these are written blind, so it's possible that syntax errors exist. they assume clean tables, eg no repeating values etc
+
+## query 1
+1. how many users compplete an exercise in their first month per monthly cohort? (users: user_id,created_at; exercises: exercise_id,user-id,exercise_completion_date
+
+with cohortss as
+--get user_id and start month
+select user_id,min(concat(extract ( year from created_at), extract(month from created_at))) cohort from users
+group by user_id
+,--get user_id exercise completion month
+completion as
+select  
+ user_id,concat(extract ( year from created_at), extract(month from created_at) yrmon, 1 as exercises
+group by 1,2
+
+select user.cohort, sum(exercises.exercises)/count(*)  --number who completed/number who started
+from 
+cohort
+left join completion
+on cohort.user-id = completion.user_id
+and user.cohort = completion.yrmon
+group by user.cohort
+## query 2
+
+2. frequency dist for number of activities each user completed
+
+--number each user completed
+with exercises as(
+select user_id, count(distinct exercise_id) exercises
+from exercises
+group by user_id)
+select quartile, count(*) ct from (
+select 
+user_id,ntile(4) over(order by exercises) quartile
+from exercises)
+## query 3
+3. Which orgs have most severe patient pop?
+providers: provider_id,organization_id,organization_name
+phq9: patient_id, provider_id, score, datetime_created
+find top 5 orgs by avg score 
+
+select org_name, avg(score) score from (
+select ph.patient_id, org.org_name, score from providers org inner join phq9 ph
+on ph.provider_id = org.provider_id)
+group by org_name order by avg(score) desc limit 5
